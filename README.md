@@ -83,4 +83,5 @@ The last prompt chains tools: the agent calls `web_research`, then `save_note` w
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+   My own contributions are licensed under the MIT License (see [LICENSE](LICENSE)).
+   Course-provided template code remains the property of its original authors.
