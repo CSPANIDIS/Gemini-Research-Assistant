@@ -356,7 +356,6 @@ def handle_user_turn(history: List[types.Content], user_prompt: str) -> str:
     response_parts = []
     for fc in function_calls:
         result = run_custom_function(fc)
-        print(f"[debug] called {fc.name} -> {result}")
         response_parts.append(types.Part.from_function_response(name=fc.name, response=result))
     history.append(types.Content(role="user", parts=response_parts))
 
@@ -375,7 +374,6 @@ def handle_user_turn(history: List[types.Content], user_prompt: str) -> str:
         )
     except Exception as e:
         return f"Error generating final answer: {e!r}"
-    print(f"[debug] second.function_calls = {second.function_calls}")
     history.append(second.candidates[0].content)
     return extract_text(second)
 
