@@ -1,3 +1,13 @@
+"""Gemini-powered research assistant.
+
+Exposes a small set of custom tools (note saving, web research, sentiment
+analysis and summarization) to a Gemini model through manual function calling,
+and runs an interactive command-line conversation loop on top of them.
+
+Requires the ``GEMINI_API_KEY`` environment variable (a ``.env`` file is
+supported).
+"""
+
 import os
 from typing import Any, Dict, List
 
@@ -15,9 +25,18 @@ client = genai.Client(api_key=api_key)
 MODEL_ID = "gemini-3.8-flash"  # tools-capable model
 
 
-# --- 1. Agent Function Definition (Example: save_note) ---
+# --- 1. Custom function implementations --------------------------------------
 def save_note(content: str, filename: str) -> str:
-    """Append a note to a local text file."""
+    """Append a note to a local text file.
+
+    Args:
+        content: Text of the note to store.
+        filename: Path of the file to append to; created if it does not exist.
+
+    Returns:
+        A confirmation message on success, or an error message describing the
+        failure.
+    """
     try:
         with open(filename, "a", encoding="utf-8") as f:
             f.write(content + "\n\n")
@@ -26,9 +45,18 @@ def save_note(content: str, filename: str) -> str:
         return f"Error saving note: {e!r}"
 
 def web_research(query: str, url: str | None = None) -> Dict[str, Any]:
-    """
-    Use Google Search + URL Context to get fresh info and summarize it.
-    This is where we integrate the google_search + url_context tools.
+    """Research a topic on the web and return a short summary.
+
+    Uses Gemini's built-in ``google_search`` and ``url_context`` tools to
+    gather up-to-date information.
+
+    Args:
+        query: Topic or question to research.
+        url: Optional URL to read and use as additional context.
+
+    Returns:
+        ``{"status": "ok", "summary": <text>}`` on success, or
+        ``{"status": "error", "error": <message>}`` if the request fails.
     """
     tools = [
         {"google_search": {}},
@@ -57,9 +85,17 @@ def web_research(query: str, url: str | None = None) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-# TODO: Define function analyze_sentiment() to analyze sentiment of text. 
 def analyze_sentiment(analyzed_text:str) -> Dict[str, Any]:
-    """ Analyzes the text and classifies it as positive, negative or neutral and gives a one sentence reason"""
+    """Classify the sentiment of a text.
+
+    Args:
+        analyzed_text: The text to analyze.
+
+    Returns:
+        ``{"status": "ok", "result": <text>}`` where the result classifies the
+        text as positive, negative or neutral with a one-sentence reason, or
+        ``{"status": "error", "error": <message>}`` if the request fails.
+    """
 
     prompt = ('Analyze the following text and classify it as positive, negative or neutral ' 
                 f'and give a one sentence reason:\n{analyzed_text}')
@@ -79,9 +115,17 @@ def analyze_sentiment(analyzed_text:str) -> Dict[str, Any]:
 
 
 
-# TODO: Define function generate_concise_summary() to generate summary of long text.
 def generate_concise_summary(text: str, max_length: int = 100) -> Dict[str, Any]:
-    """This function takes a text and generates a summary that its length cannot be more than max_length words"""
+    """Summarize a long text within a word limit.
+
+    Args:
+        text: The text to summarize.
+        max_length: Maximum number of words the summary may contain.
+
+    Returns:
+        ``{"status": "ok", "summary": <text>}`` on success, or
+        ``{"status": "error", "error": <message>}`` if the request fails.
+    """
     prompt = (
         f"Create a concise summary of the provided text that can be up to {max_length} words\n"
         f"Here's the text: \n{text}"
@@ -103,9 +147,11 @@ def generate_concise_summary(text: str, max_length: int = 100) -> Dict[str, Any]
 
 
 
-# --- 2. Function Declarations (Schemas) ---
+# --- 2. Function declarations (schemas) --------------------------------------
+# Each declaration describes a custom function to the model so it can decide
+# when to call it and with which arguments.
 
-# Define the schema for the save_note function
+# Schema for save_note()
 save_note_decl = types.FunctionDeclaration(
     name="save_note",
     description="Save a short research note to a local text file.",
@@ -122,6 +168,7 @@ save_note_decl = types.FunctionDeclaration(
     },
 )
 
+# Schema for web_research()
 web_research_decl = types.FunctionDeclaration(
     name="web_research",
     description=(
@@ -145,7 +192,7 @@ web_research_decl = types.FunctionDeclaration(
 )
 
 
-# TODO: Define schema for analyze_sentiment()
+# Schema for analyze_sentiment()
 analyze_sentiment_decl = types.FunctionDeclaration(
     name="analyze_sentiment",
     description=(
@@ -161,7 +208,7 @@ analyze_sentiment_decl = types.FunctionDeclaration(
     },
 )
 
-# TODO: Define schema for generate_concise_summary()
+# Schema for generate_concise_summary()
 generate_concise_summary_decl = types.FunctionDeclaration(
     name="generate_concise_summary",
     description=(
@@ -178,6 +225,7 @@ generate_concise_summary_decl = types.FunctionDeclaration(
 )
 
 
+# Bundle all declarations into a single tool exposed to the model.
 custom_functions_tool = types.Tool(
     function_declarations=[
         save_note_decl,
@@ -193,6 +241,16 @@ TOOLS = [custom_functions_tool]
 
 # --- Function-call dispatcher -------------------------------------------------
 def run_custom_function(fc: types.FunctionCall | Any) -> Dict[str, Any]:
+    """Dispatch a model-requested function call to its implementation.
+
+    Args:
+        fc: The function call returned by the model, or a part wrapping one.
+
+    Returns:
+        The called function's result dictionary, or
+        ``{"status": "error", "error": <message>}`` if the function name is
+        unknown or the call raises.
+    """
     name = getattr(fc, "name", None)
     call_obj = getattr(fc, "function_call", fc)
     args = dict(getattr(call_obj, "args", {}) or {})
@@ -226,6 +284,17 @@ def run_custom_function(fc: types.FunctionCall | Any) -> Dict[str, Any]:
 
 # --- Response text helper ----------------------------------------------------
 def extract_text(response: types.GenerateContentResponse) -> str:
+    """Return the text of a model response.
+
+    Prefers the response's ``text`` shortcut and otherwise concatenates the
+    text parts of all candidates, joined by newlines.
+
+    Args:
+        response: The response returned by ``generate_content``.
+
+    Returns:
+        The extracted text, or an empty string if the response has none.
+    """
     if getattr(response, "text", None):
         return response.text
     pieces: List[str] = []
@@ -239,7 +308,21 @@ def extract_text(response: types.GenerateContentResponse) -> str:
 
 # --- Two-turn function-calling per user prompt -------------------------------
 def handle_user_turn(history: List[types.Content], user_prompt: str) -> str:
-    # 1) User message
+    """Process one user prompt using manual two-turn function calling.
+
+    The first model call may request custom functions; these are executed
+    locally and their results are sent back in a second call that produces the
+    final answer. ``history`` is updated in place with every message exchanged.
+
+    Args:
+        history: Conversation so far; mutated by this function.
+        user_prompt: The user's latest message.
+
+    Returns:
+        The assistant's final answer, or an error message if a model call
+        fails.
+    """
+    # 1) Record the user message
     user_content = types.Content(
         role="user",
         parts=[types.Part.from_text(text=user_prompt)],
@@ -269,16 +352,16 @@ def handle_user_turn(history: List[types.Content], user_prompt: str) -> str:
         return extract_text(first)
 
     # 2) Execute requested custom functions and send results back
-    # ⬜ TODO 1: create an empty list to collect the response parts
+    # Collect one function-response part per requested call
     response_parts = []
-    # ⬜ TODO 2: loop over function_calls
     for fc in function_calls:
         result = run_custom_function(fc)
         print(f"[debug] called {fc.name} -> {result}")
         response_parts.append(types.Part.from_function_response(name=fc.name, response=result))
     history.append(types.Content(role="user", parts=response_parts))
 
-    # Second turn: final answer
+    # Second turn: the model composes the final answer from the function
+    # results; tools are disabled so it cannot request further calls.
     try:
         second = client.models.generate_content(
             model=MODEL_ID,
@@ -299,6 +382,7 @@ def handle_user_turn(history: List[types.Content], user_prompt: str) -> str:
 
 # --- Conversation loop Execution ---------------------------------------------
 def main() -> None:
+    """Run the interactive assistant until the user types 'exit' or 'quit'."""
     print("AI Research Assistant ready.")
     print("Type 'exit' to quit.\n")
     history: List[types.Content] = []
