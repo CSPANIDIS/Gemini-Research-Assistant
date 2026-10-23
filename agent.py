@@ -306,76 +306,70 @@ def extract_text(response: types.GenerateContentResponse) -> str:
     return "\n".join(pieces).strip()
 
 
-# --- Two-turn function-calling per user prompt -------------------------------
-def handle_user_turn(history: List[types.Content], user_prompt: str) -> str:
-    """Process one user prompt using manual two-turn function calling.
+# --- Agent loop: multi-step function calling per user prompt -----------------
+MAX_STEPS = 5  # safety limit on tool-calling rounds per user prompt
 
-    The first model call may request custom functions; these are executed
-    locally and their results are sent back in a second call that produces the
-    final answer. ``history`` is updated in place with every message exchanged.
+
+def handle_user_turn(history: List[types.Content], user_prompt: str) -> str:
+    """Process one user prompt with a multi-step function-calling loop.
+
+    Each round calls the model with the custom tools enabled. If the model
+    requests function calls, they are executed locally and their results are
+    added to the history, then the model is called again. The loop ends when
+    the model replies with plain text, or after ``MAX_STEPS`` rounds. This lets
+    the agent chain tools, e.g. research a topic and then save a note about it.
 
     Args:
         history: Conversation so far; mutated by this function.
         user_prompt: The user's latest message.
 
     Returns:
-        The assistant's final answer, or an error message if a model call
-        fails.
+        The assistant's final answer, or an error/limit message.
     """
-    # 1) Record the user message
-    user_content = types.Content(
-        role="user",
-        parts=[types.Part.from_text(text=user_prompt)],
+    # Record the user message
+    history.append(
+        types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=user_prompt)],
+        )
     )
-    history.append(user_content)
 
-    # First turn: model decides which function(s) to call
-    try:
-        first = client.models.generate_content(
-            model=MODEL_ID,
-            contents=history,
-            config=types.GenerateContentConfig(
-                tools=TOOLS,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True  # we manage function calling manually
+    for _ in range(MAX_STEPS):
+        # Ask the model what to do next, with the custom tools available
+        try:
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                contents=history,
+                config=types.GenerateContentConfig(
+                    tools=TOOLS,
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=True  # we manage function calling manually
+                    ),
                 ),
-            ),
-        )
-    except Exception as e:
-        return f"Error calling the model: {e!r}"
+            )
+        except Exception as e:
+            return f"Error calling the model: {e!r}"
 
-    history.append(first.candidates[0].content)
-    function_calls = first.function_calls or []
+        history.append(response.candidates[0].content)
+        function_calls = response.function_calls or []
 
-    # Model answered directly (or only used its own tools inside web_research)
-    if not function_calls:
-        return extract_text(first)
+        # No tool requests means the model has produced its final answer
+        if not function_calls:
+            return extract_text(response)
 
-    # 2) Execute requested custom functions and send results back
-    # Collect one function-response part per requested call
-    response_parts = []
-    for fc in function_calls:
-        result = run_custom_function(fc)
-        response_parts.append(types.Part.from_function_response(name=fc.name, response=result))
-    history.append(types.Content(role="user", parts=response_parts))
+        # Execute every requested function and send all results back at once
+        response_parts = []
+        for fc in function_calls:
+            result = run_custom_function(fc)
+            response_parts.append(
+                types.Part.from_function_response(name=fc.name, response=result)
+            )
+        history.append(types.Content(role="user", parts=response_parts))
 
-    # Second turn: the model composes the final answer from the function
-    # results; tools are disabled so it cannot request further calls.
-    try:
-        second = client.models.generate_content(
-            model=MODEL_ID,
-            contents=history,
-            config=types.GenerateContentConfig(
-                tools=[],
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=True
-                ),
-            ),
-        )
-    except Exception as e:
-        return f"Error generating final answer: {e!r}"
-    history.append(second.candidates[0].content)
-    return extract_text(second)
+    return (
+        f"Stopped after {MAX_STEPS} tool-calling rounds without a final answer. "
+        "Try a simpler or more specific request."
+    )
 
 
 # --- Conversation loop Execution ---------------------------------------------
